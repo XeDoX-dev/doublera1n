@@ -43,6 +43,31 @@ Prefer a menu? `./dualboot.sh` (↑/↓ select, Enter run):
 
 I also fixed a lot of problems such as Wifi did not auto connect when reboot, deep sleep panic the device, SEP-less panic stuff, etc. You can check patches i did in the repo as well.
 
+## Experimental USB setup without UART
+
+The setup ramdisk can send the result and installed APTicket over wired usbmuxd. The phone still needs pwned DFU. Once the boot chain has been sent, keep the phone connected to the Mac with a USB data connection. This path needs a device test on a supported A13 build.
+
+On the Mac, use full Xcode with the iPhoneOS SDK and build a separate `rdsetup` binary.
+
+```sh
+./setup.sh
+mkdir -p "$HOME/dualboot-work"
+sdk=$(xcrun --sdk iphoneos --show-sdk-path)
+xcrun clang -target arm64-apple-ios17.0 -isysroot "$sdk" -O2 -Wall \
+    src/rdsetup.c src/rdsetup_usb.c -framework CoreFoundation -framework IOKit \
+    -o "$HOME/dualboot-work/rdsetup-usb"
+ldid -Ssrc/rdsetup.ents.plist "$HOME/dualboot-work/rdsetup-usb"
+```
+
+Start with a USB probe. It boots the ramdisk and checks the connection before setup can change DataB.
+
+```sh
+DUALBOOT_SETUP_TRANSPORT=usb DUALBOOT_USB_PROBE=1 \
+    OSB_RDSETUP="$HOME/dualboot-work/rdsetup-usb" ./boot.sh install
+```
+
+After `USB probe passed`, reboot the phone. To run setup, repeat the command with `DUALBOOT_USB_PROBE` unset. The same USB transport can run `./boot.sh remove` with the usual removal confirmation. If the probe times out, check whether the ramdisk appears in `idevice_id -l`. If the installer finds multiple distinct installed APTickets, it stops before changing DataB.
+
 ## Dualboot: a 2nd iOS (developing feature)
 > [!NOTE]
 > **Developing feature.** The code is in, but it has not been booted on a device yet. Expect bugs.
@@ -79,7 +104,7 @@ Every patch site is found again in the IPSW of the build you pick. If Apple chan
 ./dualboot.py precheck --build <build> --ipsw <file|URL> # an IPSW you fetched yourself
 ```
 
-TSS: if Apple doesn't sign the build anymore (old builds, betas), the newest signed build's ticket is used for the setup chain, the patched iBoot doesn't check AP images. Once installed, 2nd Data uses the ticket installed on the phone (read over UART), this UART require you to have this kind of board:
+TSS: if Apple doesn't sign the build anymore (old builds, betas), the newest signed build's ticket is used for the setup chain, the patched iBoot doesn't check AP images. Once installed, 2nd Data uses the ticket installed on the phone. The default setup reads it over UART using a board like this one.
 
 ![B4 PICO DFU board (RP2350, Lightning plug + USB-C): pwned DFU and UART over the Lightning port](pico_uart.jpg)
 

@@ -499,9 +499,25 @@ def prepare_iboot(ws):
             ws.p('out', out), capture=True)
 
 def build_setup_chain(ws, mode):
-    ws.py('mk_setuprd.py', mode, capture=True)
-    ws.py('mk_chain.py', mode, capture=True)
+    transport = os.environ.get('DUALBOOT_SETUP_TRANSPORT', 'uart')
+    if transport not in ('uart', 'usb'):
+        die("DUALBOOT_SETUP_TRANSPORT must be uart or usb.")
+    if transport == 'uart' and os.environ.get('DUALBOOT_USB_PROBE') == '1':
+        die("DUALBOOT_USB_PROBE=1 requires DUALBOOT_SETUP_TRANSPORT=usb.")
+    token = None
+    if transport == 'usb':
+        import secrets
+        from rdsetup_usb import TOKEN_SIZE, SetupUSBError, require_usbmux
+        try:
+            require_usbmux()
+        except SetupUSBError as error:
+            die(str(error))
+        token = secrets.token_bytes(TOKEN_SIZE)
+    env = ws.env(OSB_SETUP_USB_TOKEN=token.hex() if token else '', OSB_SETUP_USB_BUILD=ws.profile['build'])
+    for script in ('mk_setuprd.py', 'mk_chain.py'):
+        run(sys.executable, os.path.join(LIB, script), mode, env=env, capture=True)
     ws.py('mk_kernel.py', capture=True)     # after mk_chain: replaces its stock kernel/TXM with the patched ones
+    return token
 
 def setup_boot(ws, mode):
     """Boot the setup ramdisk and follow rdsetup on the UART. Returns the captured bytes."""
@@ -529,6 +545,37 @@ def setup_boot(ws, mode):
     if hit.endswith(b'FAILED'):
         die("rdsetup reported an error (see above) - nothing else was changed")
     return ser.buf
+
+def setup_boot_usb(ws, mode, token, device):
+    """Boot rdsetup and read its token-gated report over wired USB."""
+    import asyncio
+    from rdsetup_usb import SetupUSBError, get_report
+
+    ecid = device['ECID'].lower().removeprefix('0x').zfill(16)
+    if ecid != ws.ecid:
+        die("The DFU device changed after preparing the setup ramdisk.")
+    say("boot setup ramdisk for USB capture ...")
+    result = run(sys.executable, os.path.join(LIB, 'boot_chain.py'), env=ws.env(), check=False)
+    if result.returncode:
+        die("sending the USB setup chain failed")
+    say(f"waiting for setup over USB (ECID {ecid}) ...")
+    try:
+        report = asyncio.run(get_report(ecid, token, probe=os.environ.get('DUALBOOT_USB_PROBE') == '1'))
+    except SetupUSBError as error:
+        die(str(error))
+    if report is None:
+        say("USB probe passed. Reboot the phone before starting setup.")
+        return None
+
+    logpath = ws.p('logs', f'setup-{mode}-usb-{time.strftime("%Y%m%d-%H%M%S")}.log')
+    with open(logpath, 'wb') as f:
+        f.write(report.log)
+    say(f"USB setup log {logpath}")
+    if report.state != b'O':
+        die(f"rdsetup reported a failure over USB.\n{report.log[-2000:].decode('utf-8', errors='replace')}")
+    if mode == 'remove' and report.ticket:
+        die("Unexpected APTicket in the USB removal report.")
+    return report
 
 def cmd_install(a):
     bad = host_check()
@@ -583,17 +630,30 @@ def cmd_install(a):
     complete_profile(ws)
     prepare_tickets(ws)
     prepare_iboot(ws)
-    say("build setup chain ..."); build_setup_chain(ws, 'install')
+    say("build setup chain ...")
+    usb_token = build_setup_chain(ws, 'install')
     q = wait_dfu(pwned=True)
-    buf = setup_boot(ws, 'install')
+    report = None
+    if usb_token is None:
+        buf = setup_boot(ws, 'install')
+    else:
+        report = setup_boot_usb(ws, 'install', usb_token, q)
+        if report is None:
+            return
+        buf = report.log
     import re
     m = re.search(rb'SYSBUILD (\S+) SYSVER (\S+)', buf)
     if not m or m.group(1).decode() != prof['build']:
         die(f"the phone runs {m.group(1).decode() if m else '?'} - does not match profile {prof['build']}. "
             "Stopping (DataB was created but is unused; remove it with ./dualboot.py remove).")
-    tkt, d = parse_ticket(buf)
-    if tkt is None:
-        die(f"could not rebuild the APTicket from the UART ({d}) - run install again (DataB is kept)")
+    if report is None:
+        tkt, d = parse_ticket(buf)
+        if tkt is None:
+            die(f"could not rebuild the APTicket from the UART ({d}) - run install again (DataB is kept)")
+    else:
+        tkt, d = report.ticket, report.ticket_dir
+        if not tkt:
+            die("USB setup completed without an installed APTicket. See the USB setup log.")
     open(ws.p('out/apticket.installed.der'), 'wb').write(tkt)
     say(f"installed APTicket: {d[:16]}... ({len(tkt)} bytes)")
     ws.state['setup'] = time.strftime('%Y-%m-%d %H:%M:%S'); ws.save()
@@ -640,9 +700,13 @@ def cmd_remove(a):
     if not os.path.exists(ws.p('build/ipsw/BuildManifest.plist')):
         extract_ipsw(ws, find_ipsw(ws.profile, getattr(a, 'ipsw', None)))
     prepare_tickets(ws); prepare_iboot(ws)
-    say("build setup chain (remove) ..."); build_setup_chain(ws, 'remove')
+    say("build setup chain (remove) ...")
+    usb_token = build_setup_chain(ws, 'remove')
     q = wait_dfu(pwned=True)
-    setup_boot(ws, 'remove')
+    if usb_token is None:
+        setup_boot(ws, 'remove')
+    elif setup_boot_usb(ws, 'remove', usb_token, q) is None:
+        return
     ws.state.update(installed=False, provisioned=None, removed=time.strftime('%Y-%m-%d %H:%M:%S')); ws.save()
     say("2nd Data removed. Hold the buttons to reset the phone -> stock iOS boots normally.")
 

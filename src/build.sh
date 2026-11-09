@@ -58,7 +58,7 @@ fat "$BOOT/obhook.dylib" obhook; ldid -S "$BOOT/obhook.dylib"
 # ---------------------------------------------------------------- setup ramdisk (payload/setup)
 # it runs as restored_external: the platform policy only lets it open /dev/disk* (APFSVolumeDelete in remove mode
 # loads the container from /dev/disk1) with disk-device-access, like the stock restored_external and newfs_apfs
-cc "${CF[@]}" "$SRC/rdsetup.c" -framework CoreFoundation -framework IOKit -o "$SETUP/rdsetup"
+cc "${CF[@]}" "$SRC/rdsetup.c" "$SRC/rdsetup_usb.c" -framework CoreFoundation -framework IOKit -o "$SETUP/rdsetup"
 ldid -S"$SRC/rdsetup.ents.plist" "$SETUP/rdsetup"
 # 2nd iOS volumes (developing feature): run on 2nd Data over SSH; newfs_apfs + APFSVolumeDelete need the same
 # disk-device-access entitlement as rdsetup

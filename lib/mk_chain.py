@@ -44,7 +44,14 @@ def main():
     sign(IM4P(fourcc='rdtr', payload=open(patched, 'rb').read()), 'DeviceTree.img4')
     shutil.copy2(osbcfg.out('rsep.img4'), os.path.join(OUT, 'SEP.img4'))
     shutil.copy2(osbcfg.work(f'setuptc-{MODE}.img4'), os.path.join(OUT, 'RestoreTrustCache.img4'))
-    shutil.copy2(osbcfg.work(f'setuprd-{MODE}.img4'), os.path.join(OUT, 'RestoreRamdisk.img4'))
+    ramdisk = os.path.join(OUT, 'RestoreRamdisk.img4')
+    if os.environ.get('OSB_SETUP_USB_TOKEN'):
+        fd = os.open(ramdisk, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+    shutil.copy2(osbcfg.work(f'setuprd-{MODE}.img4'), ramdisk)
     shutil.copy2(MIN_IBOOT, os.path.join(OUT, 'iBSS.raw'))
     print("SEP/RestoreTrustCache/RestoreRamdisk/iBSS.raw copied")
 
